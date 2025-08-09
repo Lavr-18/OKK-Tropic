@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  report_generator:
+    build: .
+    env_file:
+      - .env
+    # Команда, которая будет выполняться, когда вы запустите 'docker-compose run'
+    command: python main.py
