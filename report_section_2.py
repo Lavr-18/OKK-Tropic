@@ -219,7 +219,8 @@ def get_section_2_report_data(report_date_msk, uis_base_url, uis_api_token, reta
     out_calls = []
 
     missed_calls_count = 0
-    unique_callers = set()
+    # --- ИСПРАВЛЕНИЕ: Множество для уникальных номеров пропущенных звонков ---
+    unique_missed_callers = set()
     missed_call_details = []
 
     for call in all_calls:
@@ -227,17 +228,17 @@ def get_section_2_report_data(report_date_msk, uis_base_url, uis_api_token, reta
         is_lost = call.get('is_lost')
         phone_number = call.get('contact_phone_number')
         start_time_str = call.get('start_time')
-        # Получаем длительность звонка, по умолчанию 0, если поля нет
         call_duration = call.get('call_session_duration', 0)
 
         if direction == 'in':
             in_calls.append(call)
-            if phone_number:
-                unique_callers.add(phone_number)
 
-            # !!! ОБНОВЛЕННАЯ ЛОГИКА ДЛЯ "ПРОПУЩЕННЫХ ЗВОНКОВ"
-            if is_lost is True and call_duration > 10:  # Пропущенный входящий звонок с длительностью > 10 секунд
+            if is_lost is True and call_duration > 10:
                 missed_calls_count += 1
+                if phone_number:
+                    # --- ИСПРАВЛЕНИЕ: Добавляем номер в новое множество ---
+                    unique_missed_callers.add(phone_number)
+
                 if phone_number and start_time_str:
                     start_time_dt = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
                     missed_call_details.append({
@@ -249,11 +250,9 @@ def get_section_2_report_data(report_date_msk, uis_base_url, uis_api_token, reta
 
     print(f"Отладка: Из них {len(in_calls)} входящих и {len(out_calls)} исходящих.")
 
-    # --- Подсчет перезвонов более 5 минут и не перезвонивших/не написавших ---
     late_callbacks_count = 0
-    responded_to_missed_numbers = set()  # Номера пропущенных, на которые был любой ответ
+    responded_to_missed_numbers = set()
 
-    # Сначала собираем все исходящие звонки по номерам и времени
     outgoing_calls_by_number = {}
     for call in out_calls:
         phone_number = call.get('contact_phone_number')
@@ -271,9 +270,8 @@ def get_section_2_report_data(report_date_msk, uis_base_url, uis_api_token, reta
         missed_phone = missed_call['phone_number']
         missed_time_unix = missed_call['start_time_unix']
 
-        found_any_response = False  # Флаг для любого ответа (звонок ИЛИ чат)
+        found_any_response = False
 
-        # 1. Проверка обратного звонка
         found_callback_call = False
         first_callback_call_time_diff = float('inf')
 
@@ -286,8 +284,6 @@ def get_section_2_report_data(report_date_msk, uis_base_url, uis_api_token, reta
                     if time_diff < first_callback_call_time_diff:
                         first_callback_call_time_diff = time_diff
 
-        # 2. Проверка ответа в чате RetailCRM (пока игнорируем ошибки)
-        # Если chat_responded == True, это означает, что ответ был через чат.
         chat_responded = check_retailcrm_chat_response(
             missed_phone,
             missed_time_unix,
@@ -299,17 +295,15 @@ def get_section_2_report_data(report_date_msk, uis_base_url, uis_api_token, reta
 
         if found_any_response:
             responded_to_missed_numbers.add(missed_phone)
-            # Логика для late_callbacks_count относится только к звонкам.
-            if found_callback_call and first_callback_call_time_diff > 300: # 300 секунд = 5 минут
+            if found_callback_call and first_callback_call_time_diff > 300:
                 late_callbacks_count += 1
 
-    # Учитываем, что responded_to_missed_numbers может содержать номера, отвеченные через чат.
-    # Если проверка чата не работает, то это будет только прозвон.
     unresponded_calls_count = missed_calls_count - len(responded_to_missed_numbers)
 
     report_lines = [
         f"2. Пропущенных - {missed_calls_count}",
-        f"Абонентов - {len(unique_callers)}",
+        # --- ИСПРАВЛЕНИЕ: Выводим количество уникальных номеров пропущенных звонков ---
+        f"Абонентов - {len(unique_missed_callers)}",
         f"Количество перезвонов более 5 минут - {late_callbacks_count}",
         f"Не перезвонили/не написали - {unresponded_calls_count}"
     ]
@@ -322,7 +316,7 @@ if __name__ == "__main__":
 
     UIS_BASE_URL_TEST = "https://dataapi.uiscom.ru/v2.0"
     UIS_API_TOKEN_TEST = os.getenv("UIS_API_TOKEN")
-    REPORT_DATE_MSK_TEST = datetime(2025, 7, 10).date()
+    REPORT_DATE_MSK_TEST = datetime(2025, 8, 10).date()
 
     RETAILCRM_BASE_URL_TEST = os.getenv("RETAILCRM_BASE_URL")
     RETAILCRM_API_KEY_TEST = os.getenv("RETAILCRM_API_TOKEN")
