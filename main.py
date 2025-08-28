@@ -28,16 +28,18 @@ UIS_API_TOKEN = os.getenv("UIS_API_TOKEN")
 RETAILCRM_BOT_BASE_URL = "https://mg-s1.retailcrm.pro/api/bot/v1"
 RETAILCRM_BOT_API_TOKEN = os.getenv("RETAILCRM_BOT_API_TOKEN")
 
-# Константы для Telegram
+# --- ОБНОВЛЕННЫЕ КОНСТАНТЫ ДЛЯ TELEGRAM ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Добавлена новая переменная для ID темы (подгруппы)
+TELEGRAM_TOPIC_ID = os.getenv("TELEGRAM_TOPIC_ID")
 
 # REPORT_UUID может быть использован для уникальной идентификации отчета, если нужно.
 REPORT_UUID = str(uuid.uuid4())
 
 # Если токены не найдены, выходим с ошибкой
 if not RETAILCRM_API_TOKEN:
-    print("Ошибка: Переменная окружения 'RETAILCRM_API_TOKEN' не установлена.")
+    print("Ошибка: Переменная окружения 'RETAILCRM_API_KEY' не установлена.")
     exit(1)
 if not UIS_API_TOKEN:
     print("Ошибка: Переменная окружения 'UIS_API_TOKEN' не установлена.")
@@ -57,10 +59,12 @@ if not TELEGRAM_BOT_TOKEN:
 if not TELEGRAM_CHAT_ID:
     print("Ошибка: Переменная окружения 'TELEGRAM_CHAT_ID' не установлена.")
     exit(1)
+# Новая проверка на наличие ID темы
+if not TELEGRAM_TOPIC_ID:
+    print("Внимание: Переменная окружения 'TELEGRAM_TOPIC_ID' не установлена. Сообщения будут отправлены в общую тему.")
 
 
 # --- Функции для отчета (оставляем как есть) ---
-
 def get_section_4_report_data(report_date_msk, retailcrm_bot_base_url, bot_api_key):
     """
     Получает данные для пункта 4: Чаты проверены.
@@ -113,13 +117,15 @@ def get_section_4_report_data(report_date_msk, retailcrm_bot_base_url, bot_api_k
 
 
 # --- Асинхронная функция для отправки сообщения в Telegram ---
-async def send_telegram_message_async(text, bot_token, chat_id):
+async def send_telegram_message_async(text, bot_token, chat_id, topic_id=None):
     """
     Отправляет текстовое сообщение в указанный чат Telegram асинхронно.
+    Теперь с поддержкой отправки в конкретную тему.
     """
     try:
         bot = Bot(token=bot_token)
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+        # Добавляем параметр message_thread_id, если он предоставлен
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', message_thread_id=topic_id)
         await bot.session.close()  # Обязательно закрываем сессию
         print("Сообщение успешно отправлено в Telegram.")
     except Exception as e:
@@ -170,11 +176,14 @@ def main():
 
     # Отправляем первое сообщение асинхронно
     print("Отправка первого сообщения в Telegram...")
-    asyncio.run(send_telegram_message_async(message_1, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID))
+    # Обновлен вызов функции для передачи ID темы
+    asyncio.run(send_telegram_message_async(
+        message_1, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, topic_id=TELEGRAM_TOPIC_ID
+    ))
 
     # --- Формируем второе сообщение (проверка ФИО) ---
     message_2_lines = [
-        "Проверка оформления ФИО"  # Убрана дублирующаяся строка
+        "Проверка оформления ФИО"
     ]
 
     section_fio_output = get_fio_report_data()
@@ -184,7 +193,10 @@ def main():
 
     # Отправляем второе сообщение асинхронно
     print("Отправка второго сообщения в Telegram...")
-    asyncio.run(send_telegram_message_async(message_2, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID))
+    # Обновлен вызов функции для передачи ID темы
+    asyncio.run(send_telegram_message_async(
+        message_2, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, topic_id=TELEGRAM_TOPIC_ID
+    ))
 
 
 if __name__ == "__main__":
