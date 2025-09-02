@@ -164,13 +164,13 @@ def main():
     message_1_lines.extend(section_3_output)
     message_1_lines.append("")
 
-    # Пункт 4: Чаты проверены (передаем необходимые параметры для Bot API)
-    section_4_output = get_section_4_report_data(
-        report_date_msk=REPORT_DATE_MSK,
-        retailcrm_bot_base_url=RETAILCRM_BOT_BASE_URL,
-        bot_api_key=RETAILCRM_BOT_API_TOKEN
-    )
-    message_1_lines.extend(section_4_output)
+    # # Пункт 4: Чаты проверены (передаем необходимые параметры для Bot API)
+    # section_4_output = get_section_4_report_data(
+    #     report_date_msk=REPORT_DATE_MSK,
+    #     retailcrm_bot_base_url=RETAILCRM_BOT_BASE_URL,
+    #     bot_api_key=RETAILCRM_BOT_API_TOKEN
+    # )
+    # message_1_lines.extend(section_4_output)
 
     message_1 = "\n".join(message_1_lines)
 
