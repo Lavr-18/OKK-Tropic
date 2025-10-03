@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 import uuid
 import asyncio
 from aiogram import Bot
+# УДАЛЕНА СТРОКА: from aiogram.utils.exceptions import MessageTextIsEmpty
 
 # --- Импортируем все необходимые функции для отчёта ---
 from report_section_1 import get_section_1_report_data
@@ -116,20 +117,57 @@ def get_section_4_report_data(report_date_msk, retailcrm_bot_base_url, bot_api_k
     return report_lines
 
 
+# --- Функция для разбиения длинного текста на части ---
+def split_message(text, limit=4096):
+    """
+    Рекурсивно разбивает длинный текст на части, не превышающие лимит Telegram (4096),
+    стараясь разделять по переводу строки.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    # Ищем последнюю новую строку перед лимитом
+    split_pos = text.rfind('\n', 0, limit)
+    if split_pos == -1 or split_pos < limit * 0.9:
+        # Если не нашли или нашли слишком близко к началу, обрезаем по лимиту
+        split_pos = limit
+
+    part = text[:split_pos]
+    remainder = text[split_pos:].lstrip('\n')  # Удаляем лишние переносы строки в начале остатка
+
+    return [part] + split_message(remainder, limit)
+
+
 # --- Асинхронная функция для отправки сообщения в Telegram ---
 async def send_telegram_message_async(text, bot_token, chat_id, topic_id=None):
     """
-    Отправляет текстовое сообщение в указанный чат Telegram асинхронно.
-    Теперь с поддержкой отправки в конкретную тему.
+    Отправляет текстовое сообщение в указанный чат Telegram асинхронно,
+    автоматически разбивая его на части, если оно слишком длинное.
     """
+    bot = Bot(token=bot_token)
+    message_parts = split_message(text)
+
     try:
-        bot = Bot(token=bot_token)
-        # Добавляем параметр message_thread_id, если он предоставлен
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', message_thread_id=topic_id)
-        await bot.session.close()  # Обязательно закрываем сессию
-        print("Сообщение успешно отправлено в Telegram.")
+        for i, part in enumerate(message_parts):
+            if not part.strip():  # Пропускаем пустые части
+                continue
+
+            # Добавляем нумерацию страниц в заголовок, если частей больше одной
+            if len(message_parts) > 1:
+                # Временно используем ** для выделения вместо HTML-тегов, чтобы избежать проблем с закрытием тегов при разбиении.
+                header = ''
+                part = header + part
+
+            await bot.send_message(chat_id=chat_id, text=part, parse_mode='HTML', message_thread_id=topic_id)
+            # Небольшая задержка, чтобы избежать лимитов Telegram при отправке нескольких частей
+            await asyncio.sleep(0.5)
+
+        print(f"Сообщение успешно отправлено в Telegram ({len(message_parts)} частей).")
     except Exception as e:
+        # Общий перехват ошибок. Ошибка MessageTextIsEmpty теперь будет поймана здесь.
         print(f"Ошибка при отправке сообщения в Telegram: {e}")
+    finally:
+        await bot.session.close()  # Обязательно закрываем сессию
 
 
 # --- Главная функция для сборки и отправки отчета ---
