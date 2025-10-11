@@ -182,8 +182,27 @@ def main():
     message_1_lines.append("---")
 
     # Пункт 1: Проверка невыполненных задач
-    section_1_output = get_section_1_report_data(REPORT_DATE_MSK, RETAILCRM_BASE_URL, RETAILCRM_API_TOKEN)
-    message_1_lines.extend(section_1_output)
+    print("Запуск синхронного получения статистики по задачам (Пункт 1)...")
+    try:
+        # ИСПРАВЛЕНИЕ: УДАЛЕН asyncio.run(), функция теперь синхронная
+        # ИСПРАВЛЕНИЕ: Переданы 4 обязательных аргумента, включая site
+        section_1_output = get_section_1_report_data(
+            report_date_msk_date_obj=REPORT_DATE_MSK,
+            retailcrm_base_url=RETAILCRM_BASE_URL,
+            api_key=RETAILCRM_API_TOKEN,
+            site=RETAILCRM_SITE_CODE
+        )
+
+        # Раздел 1 возвращает список строк, который мы напрямую добавляем
+        if section_1_output:
+            message_1_lines.extend(section_1_output)
+        else:
+            message_1_lines.append("Нет данных по задачам.")
+
+    except Exception as e:
+        message_1_lines.append(f"❌ Ошибка при получении данных для пункта 1: {e}")
+        print(f"Ошибка при выполнении get_section_1_report_data: {e}")
+
     message_1_lines.append("")
 
     # Пункт 2: Звонки UIS

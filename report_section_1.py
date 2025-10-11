@@ -1,8 +1,7 @@
 import os
 import requests
-import aiohttp
-import asyncio
 from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 
 # --- Вспомогательные функции для работы с датами и временем ---
 
@@ -10,8 +9,6 @@ from datetime import datetime, timedelta, timezone
 MSK_OFFSET = timedelta(hours=3)
 
 # Коды статусов заказов, которые относятся к группам "Новый" и "Согласование"
-# Берем только ключевые коды статусов, которые должны быть актуальны для активной работы.
-# Полный список статусов, которые вы привели в группах "New" и "Approval".
 TARGET_ORDER_STATUSES = {
     # Группа "Новый"
     "new", "gotovo-k-soglasovaniiu", "soglasovat-sostav", "agree-absence", "novyi-predoplachen", "novyi-oplachen",
@@ -28,21 +25,21 @@ TARGET_ORDER_STATUSES = {
 
 def to_msk(dt_utc):
     """Конвертирует объект datetime из UTC в MSK."""
-    # Удаляем информацию о часовом поясе, чтобы вернуть "наивный" объект времени по Москве
-    return (dt_utc + MSK_OFFSET).replace(tzinfo=None)
+    # Важно: для точности при работе с наивными объектами, лучше явно установить UTC
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+    return dt_utc.astimezone(timezone(MSK_OFFSET)).replace(tzinfo=None)
 
 
 def to_utc(dt_msk):
     """Конвертирует объект datetime из MSK в UTC."""
-    # Устанавливаем часовой пояс MSK, а затем конвертируем в UTC
     dt_with_msk_tz = dt_msk.replace(tzinfo=timezone(MSK_OFFSET))
-    return dt_with_msk_tz.astimezone(timezone.utc)
+    return dt_with_msk_tz.astimezone(timezone.utc).replace(tzinfo=None)  # Возвращаем наивный объект для совместимости
 
 
 def get_report_timeframes_utc(report_date_msk_date_obj):
     """
     Рассчитывает UTC временные рамки для отчетного дня и крайнего срока проверки контролером.
-    report_date_msk_date_obj: объект date (например, datetime.date(2025, 7, 14))
     """
     # Начало отчетного дня в MSK (00:00:00)
     start_of_report_day_msk = datetime.combine(report_date_msk_date_obj, datetime.min.time())
@@ -67,18 +64,15 @@ def format_datetime_for_api(dt_object):
     # Убеждаемся, что объект UTC и имеет информацию о часовом поясе
     if dt_object.tzinfo is None:
         dt_object = dt_object.replace(tzinfo=timezone.utc)
-    # Формат API RetailCRM, который вы используете для фильтрации
     return dt_object.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_api_datetime(dt_string):
-    """Парсит строку даты/времени RetailCRM API в объект datetime с UTC.
-    Обрабатывает различные форматы, включая те, что без секунд."""
+    """Парсит строку даты/времени RetailCRM API в объект datetime с UTC."""
     if dt_string is None:
         return None
     try:
         # Попытка парсинга с секундами (наиболее полный формат)
-        # RetailCRM может возвращать формат "YYYY-MM-DD HH:MM:SS" без T и Z
         return datetime.strptime(dt_string, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
     except ValueError:
         try:
@@ -87,216 +81,261 @@ def parse_api_datetime(dt_string):
                 tzinfo=timezone.utc)
         except ValueError:
             try:
-                # Попытка парсинга без секунд (формат в ответе get task)
+                # Попытка парсинга без секунд (YYYY-MM-DD HH:MM)
                 return datetime.strptime(dt_string, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             except ValueError:
-                print(f"Ошибка парсинга даты/времени: {dt_string}. Возвращено None.")
                 return None
 
 
-# --- Основная логика отчета ---
-
-async def get_order_status_group_async(session, order_id, api_url, api_key, site):
+# --- Новая функция: Получение статуса заказа ---
+def get_order_status(order_id, api_url, api_key, site):
     """
-    Асинхронно получает статус заказа по его ID.
-    Возвращает статус заказа (строка) или None в случае ошибки/отсутствия.
+    Синхронно получает статус заказа по его ID.
+    Возвращает код статуса заказа (строка) или None в случае ошибки/отсутствия.
     """
     order_url = f"{api_url}/orders/{order_id}?by=id&site={site}&apiKey={api_key}"
 
     try:
-        async with session.get(order_url) as response:
-            data = await response.json()
-            if data.get('success') and 'order' in data:
-                # Возвращаем код статуса из поля 'status'
-                return data['order'].get('status')
+        response = requests.get(order_url)
+        response.raise_for_status()
+        data = response.json()
 
-            # Обработка случая, когда заказ не найден или API вернул ошибку
-            if data.get('errorMsg') == 'Order not found':
-                # Это может произойти, если заказ удален или имеет другую проблему.
-                # Для целей отчета мы можем просто игнорировать такие задачи.
-                return None
+        if data.get('success') and 'order' in data:
+            return data['order'].get('status')
 
-                # Логируем другие ошибки API
-            if not data.get('success'):
-                print(f"Ошибка API при получении заказа {order_id}: {data.get('errorMsg', 'Неизвестная ошибка')}")
+        if data.get('errorMsg') == 'Order not found':
+            return None
 
-    except aiohttp.ClientError as e:
-        print(f"Ошибка сети при запросе статуса заказа {order_id}: {e}")
+        if not data.get('success'):
+            print(f"Ошибка API при получении заказа {order_id}: {data.get('errorMsg', 'Неизвестная ошибка')}")
+
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка сети/HTTP при запросе статуса заказа {order_id}: {e}")
     except Exception as e:
         print(f"Неожиданная ошибка при обработке запроса заказа {order_id}: {e}")
-
-    return None  # Возвращаем None при любых ошибках или не-успешном результате
-
-
-async def process_task_async(session, task_id, api_url, api_key, site, start_of_report_day_utc):
-    """
-    Асинхронно обрабатывает одну задачу: получает детали, проверяет время и статус заказа.
-    Возвращает словарь с деталями задачи или None, если задача не подходит.
-    """
-    task_url = f"{api_url}/tasks/{task_id}?apiKey={api_key}"
-
-    try:
-        async with session.get(task_url) as response:
-            task_data = await response.json()
-
-            if not task_data.get('success') or 'task' not in task_data:
-                # print(f"Не удалось получить детали задачи {task_id}: {task_data.get('errorMsg', 'Неизвестная ошибка')}")
-                return None
-
-            task = task_data['task']
-
-            # 1. Проверка, что задача не завершена
-            if task.get('complete') is True:
-                return None
-
-            # 2. Проверка даты задачи (задача должна быть просрочена или на отчетный день)
-            # В RetailCRM 'datetime' - это запланированная дата и время (MSK).
-            task_datetime_str = task.get('datetime')
-            if not task_datetime_str:
-                return None  # Игнорируем задачи без даты
-
-            task_datetime_msk_naive = datetime.strptime(task_datetime_str, "%Y-%m-%d %H:%M")
-            task_datetime_utc = to_utc(task_datetime_msk_naive).replace(tzinfo=timezone.utc)
-
-            # Проверяем, что задача не была просрочена до начала отчетного дня
-            # или ее срок истекает в течение отчетного дня.
-            # Мы хотим включить все задачи, срок которых был раньше, чем 00:00:00 (MSK) отчетного дня,
-            # а также задачи, срок которых приходится на отчетный день.
-            if task_datetime_utc >= start_of_report_day_utc:
-                # Если задача на отчетный день или позже - игнорируем
-                return None
-
-            # 3. Проверка статуса заказа
-            order_info = task.get('order')
-            if order_info and 'id' in order_info:
-                order_id = order_info['id']
-                order_status = await get_order_status_group_async(session, order_id, api_url, api_key, site)
-
-                # Фильтрация по статусу заказа
-                if order_status not in TARGET_ORDER_STATUSES:
-                    # print(f"Задача {task_id} проигнорирована: статус заказа {order_id} = '{order_status}' не в целевых группах.")
-                    return None
-
-                # Добавляем номер заказа для отчета
-                order_number = order_info.get('number', str(order_id))
-            else:
-                # Если задача не привязана к заказу, она игнорируется,
-                # так как мы хотим учитывать только те, что относятся к заказам.
-                return None
-
-            # 4. Формирование результата, если все проверки пройдены
-            return {
-                'id': task_id,
-                'text': task.get('text', 'Нет текста'),
-                'datetime_msk': to_msk(task_datetime_utc).strftime("%d.%m.%Y %H:%M"),  # Время задачи в MSK
-                'order_number': order_number
-            }
-
-    except aiohttp.ClientError as e:
-        print(f"Ошибка сети при запросе задачи {task_id}: {e}")
-    except Exception as e:
-        print(f"Неожиданная ошибка при обработке задачи {task_id}: {e}")
 
     return None
 
 
-async def get_overdue_tasks_section(api_url, api_key, site, report_date_msk_date_obj):
-    """
-    Асинхронно получает список просроченных задач, привязанных к заказам со статусами
-    из групп "Новый" и "Согласование".
-    """
-    start_of_report_day_utc, _, _ = get_report_timeframes_utc(report_date_msk_date_obj)
+# --- Функции для получения данных из RetailCRM ---
 
-    # Дата в UTC, на которую нам нужно получить список *просроченных* задач.
-    # RetailCRM API фильтрует по `datetime` (дате, до которой задача должна быть выполнена).
-    # Мы хотим получить задачи, срок выполнения которых истек *до* начала отчетного дня.
+def get_managers(retailcrm_base_url, api_key):
+    # ... (Оставляем функцию get_managers без изменений, она корректна)
+    url = f"{retailcrm_base_url}/users"
+    params = {"apiKey": api_key, "filter[isManager]": 1, "filter[active]": 1, "limit": 100}
 
-    # 00:00 MSK отчетного дня в UTC - это максимальный срок для отбора просроченных задач
-    filter_date_utc = format_datetime_for_api(start_of_report_day_utc)
-
-    # API-запрос на получение списка задач
-    list_tasks_url = (
-        f"{api_url}/tasks?apiKey={api_key}&filter[status]=not-completed"
-        f"&filter[dateTo]={filter_date_utc}&limit=100"  # Фильтр для просроченных (истекших до 00:00 MSK)
-    )
-
-    all_task_ids = []
+    all_managers_from_api = {}
     page = 1
+    while True:
+        params["page"] = page
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
 
-    # Используем aiohttp для всех асинхронных запросов
-    async with aiohttp.ClientSession() as session:
-        while True:
-            current_url = f"{list_tasks_url}&page={page}"
-            try:
-                async with session.get(current_url) as response:
-                    data = await response.json()
+            for user in data.get('users', []):
+                full_name = f"{user.get('firstName', '')} {user.get('lastName', '')}".strip()
+                if not full_name:
+                    full_name = user.get('email', f"Manager {user.get('id', 'Unknown')}")
+                all_managers_from_api[user['id']] = full_name
 
-                    if not data.get('success') or not data.get('tasks'):
-                        break
-
-                    # Собираем ID задач
-                    all_task_ids.extend([task['id'] for task in data['tasks']])
-
-                    if len(data['tasks']) < 100:
-                        break  # Если меньше лимита, значит, это последняя страница
-                    page += 1
-                    await asyncio.sleep(0.5)  # Небольшая задержка между страницами
-
-            except aiohttp.ClientError as e:
-                print(f"Ошибка сети при запросе списка задач (страница {page}): {e}")
+            if 'pagination' not in data or data['pagination']['currentPage'] >= data['pagination']['totalPageCount']:
                 break
-            except Exception as e:
-                print(f"Неожиданная ошибка при получении списка задач: {e}")
+            page += 1
+        except requests.exceptions.RequestException as e:
+            print(f"Ошибка при получении списка менеджеров: {e}")
+            return None
+        except Exception as e:
+            print(f"Непредвиденная ошибка при получении менеджеров: {e}")
+            return None
+
+    print(f"Отладка: Получено {len(all_managers_from_api)} активных менеджеров из API.")
+    return all_managers_from_api
+
+
+def get_tasks_due_in_period(retailcrm_base_url, api_key, start_utc, end_utc):
+    # ... (Оставляем функцию get_tasks_due_in_period без изменений, она корректна)
+    url = f"{retailcrm_base_url}/tasks"
+    params = {
+        "apiKey": api_key,
+        "filter[dateFrom]": format_datetime_for_api(start_utc),
+        "filter[dateTo]": format_datetime_for_api(end_utc),
+        "limit": 100
+    }
+
+    tasks_in_period = []
+    page = 1
+    while True:
+        params["page"] = page
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            tasks = data.get('tasks', [])
+            tasks_in_period.extend(tasks)
+
+            if not tasks or (
+                    'pagination' in data and data['pagination']['currentPage'] >= data['pagination']['totalPageCount']):
                 break
+            page += 1
+        except requests.exceptions.RequestException as e:
+            print(f"Ошибка при получении задач со сроком выполнения в период ({start_utc} - {end_utc}): {e}")
+            return None
+        except Exception as e:
+            print(f"Непредвиденная ошибка при получении задач со сроком выполнения в период: {e}")
+            return None
+    print(f"Отладка: Получено {len(tasks_in_period)} задач со сроком выполнения в период отчета.")
+    return tasks_in_period
 
-        # Параллельная обработка всех найденных задач
-        tasks_to_process = [
-            process_task_async(session, task_id, api_url, api_key, site, start_of_report_day_utc)
-            for task_id in all_task_ids
-        ]
 
-        # Запускаем все запросы одновременно. limit=20 для управления нагрузкой на API.
-        results = await asyncio.gather(*tasks_to_process)
+def get_section_1_report_data(report_date_msk_date_obj, retailcrm_base_url, api_key, site):
+    """
+    Формирует данные для Пункта 1 отчета ОКК, включая фильтрацию по статусу заказа.
+    """
+    print("Получение данных для отчета по невыполненным задачам (Пункт 1) с фильтрацией по статусу...")
 
-    # Фильтруем None (задачи, которые не прошли проверку)
-    overdue_tasks = [task for task in results if task is not None]
+    # Получаем список всех активных менеджеров
+    managers = get_managers(retailcrm_base_url, api_key)
+    if managers is None:
+        return ["1. Проверка невыполненных задач: 0\nНе удалось получить список менеджеров."]
 
-    # Сортировка по дате (самые старые просроченные - в начале)
-    overdue_tasks.sort(key=lambda x: datetime.strptime(x['datetime_msk'], "%d.%m.%Y %H:%M"))
+    # Рассчитываем временные рамки
+    (start_of_report_day_utc, end_of_report_day_utc, _) = get_report_timeframes_utc(report_date_msk_date_obj)
 
-    # Формирование отчета
-    if not overdue_tasks:
-        return ""
+    # --- Подсчет "поставлено" (задачи со сроком выполнения в отчетный день) ---
+    tasks_due_today = get_tasks_due_in_period(
+        retailcrm_base_url, api_key, start_of_report_day_utc, end_of_report_day_utc
+    )
+    if tasks_due_today is None:
+        return [
+            "1. Проверка невыполненных задач: 0\nНе удалось получить задачи со сроком выполнения в отчетный период."]
 
-    report_parts = [
-        "<b>🔴 ПРОСРОЧЕННЫЕ ЗАДАЧИ ПО АКТУАЛЬНЫМ ЗАКАЗАМ</b>",
-        f"*(Учитываются заказы в статусах групп 'Новый' и 'Согласование')*",
-        ""
-    ]
+    # Инициализация счетчиков для каждого менеджера
+    manager_report_data = defaultdict(lambda: {"поставлено": 0, "выполнено": 0, "перенесено": 0})
 
-    for task in overdue_tasks:
-        report_parts.append(
-            f"❗️ <b>Заказ {task['order_number']}</b> (Срок: {task['datetime_msk']})\n"
-            f"   - {task['text']}"
+    # Вычисляем начало и конец следующего дня в UTC для определения "перенесенных" задач
+    next_day_date_msk = report_date_msk_date_obj + timedelta(days=1)
+    start_of_next_day_msk = datetime.combine(next_day_date_msk, datetime.min.time())
+    start_of_next_day_utc = to_utc(start_of_next_day_msk).replace(tzinfo=timezone.utc)
+
+    tasks_processed_count = 0
+    tasks_filtered_out_count = 0
+
+    print("\n--- Отладка: Обработка и фильтрация задач по статусу заказа ---")
+
+    # Сначала фильтруем, затем считаем
+    for task in tasks_due_today:
+        task_id = task.get('id')
+        performer_id = task.get('performer')
+        order_info = task.get('order', {})
+        order_id = order_info.get('id')
+
+        # 1. Фильтрация по статусу заказа
+        if order_id:
+            order_status = get_order_status(order_id, retailcrm_base_url, api_key, site)
+
+            if order_status not in TARGET_ORDER_STATUSES:
+                tasks_filtered_out_count += 1
+                continue  # Пропускаем задачу, если статус нецелевой
+        else:
+            # Задачи без заказа всегда пропускаются (т.к. отчет по заказам)
+            tasks_filtered_out_count += 1
+            continue
+
+        # 2. Обработка статистики (только для прошедших фильтр задач)
+        tasks_processed_count += 1
+
+        manager_name_full = managers.get(performer_id, "Неизвестный менеджер")
+
+        if performer_id in managers:
+            manager_report_data[performer_id]["поставлено"] += 1
+
+            # a) Подсчет "выполнено"
+            if task.get('complete') is True:
+                manager_report_data[performer_id]["выполнено"] += 1
+
+            # b) Подсчет "перенесено"
+            elif task.get('complete') is False:
+                task_due_datetime_dt = parse_api_datetime(task.get('datetime'))
+
+                # Проверяем, что срок ИЗНАЧАЛЬНО был на отчетный день
+                if task_due_datetime_dt and task_due_datetime_dt.date() == start_of_report_day_utc.date():
+                    next_task_datetime_str = task.get('nextTime')
+
+                    if next_task_datetime_str and task.get('datetime') != next_task_datetime_str:
+                        next_task_datetime_dt = parse_api_datetime(next_task_datetime_str)
+
+                        # Если перенесено на следующий день (или позже)
+                        if next_task_datetime_dt and next_task_datetime_dt.date() > report_date_msk_date_obj:
+                            manager_report_data[performer_id]["перенесено"] += 1
+
+    print(f"Отладка: Всего задач, срок которых в отчетный день: {len(tasks_due_today)}")
+    print(f"Отладка: Проигнорировано (нет заказа/нецелевой статус): {tasks_filtered_out_count}")
+    print(f"Отладка: Обработано (целевые задачи): {tasks_processed_count}")
+
+    # Формируем строки для отчета (старый формат)
+    report_lines = []
+
+    # Общее количество задач, которые были поставлены (прошедшие фильтр)
+    total_tasks_assigned = sum(data['поставлено'] for data in manager_report_data.values())
+    report_lines.append(f"1. Проверка невыполненных задач: {total_tasks_assigned}")
+
+    # Сортируем менеджеров по именам для отчета
+    sorted_manager_ids = sorted(managers.keys(), key=lambda x: managers[x])
+
+    for manager_id in sorted_manager_ids:
+        manager_name = managers[manager_id]
+        data = manager_report_data[manager_id]
+
+        if data['поставлено'] > 0:  # Выводим только менеджеров, у которых были поставленные задачи
+
+            # Учитываем все, что не выполнено и не перенесено (просрочено)
+            unaccounted_tasks = data['поставлено'] - data['выполнено']
+
+            # Восклицательный знак, если есть невыполненные задачи (даже если перенесены)
+            # Чтобы соответствовать вашему примеру, где "Вера - поставлено 16/выполнено 10 (перенесенных было 1)❗️"
+            # Проще поставить ❗️ если 'поставлено' > 'выполнено'
+            exclamation = "❗️" if data['поставлено'] > data['выполнено'] else ""
+
+            # Имя сотрудника берем только первое слово (имя)
+            first_name = manager_name.split(' ')[0]
+
+            report_lines.append(
+                f"{first_name} - поставлено {data['поставлено']}/выполнено {data['выполнено']} (перенесенных было {data['перенесено']}){exclamation}"
+            )
+
+    # Если задач 0, все равно выводим заголовок:
+    if total_tasks_assigned == 0:
+        report_lines.append(
+            f"Нет задач по актуальным заказам со сроком выполнения {report_date_msk_date_obj.strftime('%d.%m.%Y')}")
+
+    return report_lines
+
+
+# Если этот файл запущен напрямую, выполним только его функцию (для тестирования)
+if __name__ == "__main__":
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    # !!! Установите желаемую дату отчета в формате datetime.date(ГОД, МЕСЯЦ, ДЕНЬ) !!!
+    REPORT_DATE_MSK_TEST = datetime.now().date() - timedelta(days=1)  # Вчерашний день
+
+    RETAILCRM_BASE_URL_TEST = os.getenv("RETAILCRM_BASE_URL")
+    API_KEY_TEST = os.getenv("RETAILCRM_API_TOKEN")
+    SITE_CODE_TEST = os.getenv("RETAILCRM_SITE_CODE")
+
+    if not API_KEY_TEST or not RETAILCRM_BASE_URL_TEST or not SITE_CODE_TEST:
+        print(
+            "Ошибка: Не все переменные окружения установлены для автономного запуска report_section_1.py.")
+    else:
+        print("Запуск report_section_1.py в тестовом режиме.")
+        # В синхронном режиме требуется передать 4 аргумента, включая site
+        report_output = get_section_1_report_data(
+            report_date_msk_date_obj=REPORT_DATE_MSK_TEST,
+            retailcrm_base_url=RETAILCRM_BASE_URL_TEST,
+            api_key=API_KEY_TEST,
+            site=SITE_CODE_TEST
         )
-
-    return "\n".join(report_parts)
-
-# Пример использования (для тестирования)
-# import datetime
-# async def main():
-#     # Замените на реальные данные для теста
-#     API_URL = "https://tropichouse.retailcrm.ru/api/v5"
-#     API_KEY = "ВАШ_КЛЮЧ"
-#     SITE = "tropichouse"
-#
-#     # Дата отчета - вчера (предполагая, что скрипт запускается сегодня)
-#     report_date = datetime.date.today() - timedelta(days=1)
-#
-#     report = await get_overdue_tasks_section(API_URL, API_KEY, SITE, report_date)
-#     print(report)
-
-# if __name__ == "__main__":
-#     # Для запуска асинхронного кода в скрипте (если он не запускается из другого асинхронного контекста)
-#     # asyncio.run(main())
-#     pass
+        for line in report_output:
+            print(line)
