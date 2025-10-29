@@ -13,6 +13,7 @@ def get_report_datetimes_msk(report_date_msk_date):
     Возвращает объекты datetime для начала (08:00 МСК) и конца (19:00 МСК)
     указанного рабочего дня в МСК.
     UIS API get.calls_report использует строки с МСК временем.
+    (Диапазон 08:00-19:00 МСК остается прежним, так как это логика рабочего дня для звонков).
     """
     MSK_TZ = timezone(timedelta(hours=3))
     start_of_workday_msk = datetime.combine(report_date_msk_date, datetime.min.time().replace(hour=8), tzinfo=MSK_TZ)
@@ -198,6 +199,7 @@ def get_section_2_report_data(report_date_msk, uis_base_url, uis_api_token, reta
     """
     print("Получение данных для пункта 2: Пропущенных, Абонентов, Перезвонов и Не перезвонивших...")
 
+    # Используем диапазон 08:00 МСК - 19:00 МСК, согласно логике рабочего дня
     start_report_msk, end_report_msk = get_report_datetimes_msk(report_date_msk)
 
     date_from_str = start_report_msk.strftime("%Y-%m-%d %H:%M:%S")
@@ -316,7 +318,8 @@ if __name__ == "__main__":
 
     UIS_BASE_URL_TEST = "https://dataapi.uiscom.ru/v2.0"
     UIS_API_TOKEN_TEST = os.getenv("UIS_API_TOKEN")
-    REPORT_DATE_MSK_TEST = datetime(2025, 8, 10).date()
+    # ИСПРАВЛЕНИЕ: Теперь тестируем текущий день
+    REPORT_DATE_MSK_TEST = datetime.now().date()
 
     RETAILCRM_BASE_URL_TEST = os.getenv("RETAILCRM_BASE_URL")
     RETAILCRM_API_KEY_TEST = os.getenv("RETAILCRM_API_TOKEN")

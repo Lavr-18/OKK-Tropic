@@ -39,13 +39,15 @@ def to_utc(dt_msk):
 
 def get_report_timeframes_utc(report_date_msk_date_obj):
     """
-    Рассчитывает UTC временные рамки для отчетного дня и крайнего срока проверки контролером.
+    Рассчитывает UTC временные рамки для отчетного дня.
+    Для отчета в 22:00 МСК, отчетный период заканчивается в 22:00:00 МСК.
     """
     # Начало отчетного дня в MSK (00:00:00)
     start_of_report_day_msk = datetime.combine(report_date_msk_date_obj, datetime.min.time())
-    # Конец отчетного дня в MSK (23:59:59)
+
+    # ИСПРАВЛЕНИЕ: Конец отчетного периода в MSK (22:00:00)
     end_of_report_day_msk = datetime.combine(report_date_msk_date_obj,
-                                             datetime.max.time().replace(second=59, microsecond=999999))
+                                             datetime.min.time().replace(hour=22, second=0, microsecond=0))
 
     # Крайний срок проверки контролером (01:00 MSK следующего дня)
     controller_deadline_msk_date = report_date_msk_date_obj + timedelta(days=1)
@@ -203,6 +205,7 @@ def get_section_1_report_data(report_date_msk_date_obj, retailcrm_base_url, api_
     (start_of_report_day_utc, end_of_report_day_utc, _) = get_report_timeframes_utc(report_date_msk_date_obj)
 
     # --- Подсчет "поставлено" (задачи со сроком выполнения в отчетный день) ---
+    # В этом месте end_of_report_day_utc уже содержит 22:00:00 МСК (19:00:00 UTC)
     tasks_due_today = get_tasks_due_in_period(
         retailcrm_base_url, api_key, start_of_report_day_utc, end_of_report_day_utc
     )
@@ -259,6 +262,7 @@ def get_section_1_report_data(report_date_msk_date_obj, retailcrm_base_url, api_
                 task_due_datetime_dt = parse_api_datetime(task.get('datetime'))
 
                 # Проверяем, что срок ИЗНАЧАЛЬНО был на отчетный день
+                # Поскольку end_of_report_day_utc теперь 22:00, это условие не изменится
                 if task_due_datetime_dt and task_due_datetime_dt.date() == start_of_report_day_utc.date():
                     next_task_datetime_str = task.get('nextTime')
 
@@ -319,7 +323,8 @@ if __name__ == "__main__":
     load_dotenv()
 
     # !!! Установите желаемую дату отчета в формате datetime.date(ГОД, МЕСЯЦ, ДЕНЬ) !!!
-    REPORT_DATE_MSK_TEST = datetime.now().date() - timedelta(days=1)  # Вчерашний день
+    # ИСПРАВЛЕНИЕ: Теперь тестируем текущий день
+    REPORT_DATE_MSK_TEST = datetime.now().date()  # Текущий день
 
     RETAILCRM_BASE_URL_TEST = os.getenv("RETAILCRM_BASE_URL")
     API_KEY_TEST = os.getenv("RETAILCRM_API_TOKEN")

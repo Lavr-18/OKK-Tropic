@@ -468,7 +468,7 @@ def test_dump_uis_call_data(report_date_msk_date, num_calls_to_dump=10):
 
 if __name__ == "__main__":
     # !!! Установите желаемую дату отчета в формате datetime.date(ГОД, МЕСЯЦ, ДЕНЬ) !!!
-    REPORT_DATE_MSK_TEST = datetime(2025, 8, 17).date()
+    REPORT_DATE_MSK_TEST = datetime.now().date()
 
     report_output = get_section_3_report_data(report_date_msk_date=REPORT_DATE_MSK_TEST)
     for line in report_output:

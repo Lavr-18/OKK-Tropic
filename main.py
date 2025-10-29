@@ -172,7 +172,7 @@ async def send_telegram_message_async(text, bot_token, chat_id, topic_id=None):
 
 # --- Главная функция для сборки и отправки отчета ---
 def main():
-    REPORT_DATE_MSK = (datetime.now() - timedelta(days=1)).date()
+    REPORT_DATE_MSK = datetime.now().date()
 
     # --- Формируем первое сообщение ---
     message_1_lines = []
