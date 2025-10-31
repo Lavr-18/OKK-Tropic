@@ -46,10 +46,11 @@ def get_report_datetimes_msk(report_date_msk_date):
 
 def get_working_datetimes_msk(report_date_msk_date):
     """
-    Возвращает начало и конец рабочего дня (9:00:00 - 19:59:59) для заданной даты в МСК.
+    Возвращает начало и конец рабочего дня (9:00:00 - 20:59:59) для заданной даты в МСК.
     """
     start_of_workday = datetime.combine(report_date_msk_date, datetime.min.time().replace(hour=9), tzinfo=MSK_TZ)
-    end_of_workday = datetime.combine(report_date_msk_date, datetime.min.time().replace(hour=19, minute=59, second=59),
+    # Обновлено: Рабочее время до 21:00, т.е. конец в 20:59:59
+    end_of_workday = datetime.combine(report_date_msk_date, datetime.min.time().replace(hour=20, minute=59, second=59),
                                       tzinfo=MSK_TZ)
     return start_of_workday, end_of_workday
 
@@ -226,22 +227,24 @@ def get_section_3_report_data(report_date_msk_date):
     start_report_msk, end_report_msk = get_report_datetimes_msk(report_date_msk_date)
     start_work_day_msk, end_work_day_msk = get_working_datetimes_msk(report_date_msk_date)
 
+    # Переменная для нерабочего времени (после 21:00)
+    non_work_time_start = datetime.combine(report_date_msk_date, datetime.min.time().replace(hour=21), tzinfo=MSK_TZ)
+
     # Расширяем временной диапазон для получения заказов:
-    # Заказы, созданные в нерабочее время, могут быть обработаны в начале следующего дня.
-    # Поэтому мы должны получить заказы за весь отчетный день, а также те, что были
-    # созданы после конца рабочего времени предыдущего дня.
+    # Получаем заказы, начиная с 21:00 предыдущего дня.
     previous_day_end = start_report_msk - timedelta(seconds=1)
+    start_time_for_api = previous_day_end.replace(hour=21, minute=0, second=0)
 
     all_orders = []
     for method_name, method_code in ORDER_METHOD_MAPPINGS.items():
         print(f"Отладка: Получаем заказы для способа оформления: '{method_name}' ({method_code})")
 
-        # Получаем заказы с конца предыдущего дня до конца отчетного дня
+        # Получаем заказы с 21:00 предыдущего дня до конца отчетного дня
         orders_for_method = get_orders_list(
             base_url=RETAILCRM_BASE_URL,
             api_key=RETAILCRM_API_TOKEN,
             site_code=RETAILCRM_SITE_CODE,
-            start_date=previous_day_end.replace(hour=20, minute=0, second=0),  # С 20:00 предыдущего дня
+            start_date=start_time_for_api,
             end_date=end_report_msk + timedelta(seconds=1),
             order_methods=[method_code]
         )
@@ -254,7 +257,7 @@ def get_section_3_report_data(report_date_msk_date):
     print(
         f"Отладка: Получено {len(all_orders_unique)} уникальных заказов из RetailCRM с целевыми способами оформления.")
 
-    uis_date_from_str = previous_day_end.replace(hour=20, minute=0, second=0).strftime("%Y-%m-%d %H:%M:%S")
+    uis_date_from_str = start_time_for_api.strftime("%Y-%m-%d %H:%M:%S")
     uis_date_to_str = (end_report_msk + timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
     all_uis_calls = get_uis_call_history(UIS_BASE_URL, UIS_API_TOKEN, uis_date_from_str, uis_date_to_str)
@@ -288,6 +291,7 @@ def get_section_3_report_data(report_date_msk_date):
     orders_outside_work_time_count = 0
 
     report_output_lines = []
+    overdue_details = []  # Новый список для хранения только просроченных деталей
 
     for order in all_orders_unique:
         order_number = order.get('number')
@@ -303,8 +307,8 @@ def get_section_3_report_data(report_date_msk_date):
 
         normalized_customer_phone = normalize_phone_number(customer_phone_number)
 
-        if not (created_at_str and normalized_customer_phone):
-            print(f"Отладка: Пропуск заказа {order_number} из-за отсутствия даты создания или номера клиента.")
+        # Пропускаем заказы без номера или без номера телефона клиента
+        if not (order_number and created_at_str and normalized_customer_phone):
             continue
 
         try:
@@ -314,29 +318,35 @@ def get_section_3_report_data(report_date_msk_date):
                 f"Предупреждение: Неверный формат даты создания заказа {order_number}: {created_at_str}. Заказ пропущен из анализа.")
             continue
 
-        # Определяем дедлайн для первого контакта
+        # Проверка, что заказ попадает в отчетный период (весь день или после 21:00 предыдущего дня)
+        previous_day_non_work_time = datetime.combine(report_date_msk_date - timedelta(days=1),
+                                                      datetime.min.time().replace(hour=21), tzinfo=MSK_TZ)
+        is_relevant_order = (start_report_msk <= order_created_at_dt <= end_report_msk) or \
+                            (
+                                    order_created_at_dt >= previous_day_non_work_time and order_created_at_dt < start_work_day_msk)
+
+        if not is_relevant_order:
+            continue  # Заказ вне анализируемого окна
+
+        total_relevant_orders += 1
+
+        # Расчет дедлайна и подсчет рабочего/нерабочего времени
         contact_deadline_dt = None
-        if start_work_day_msk <= order_created_at_dt < end_work_day_msk:
-            # Заказ создан в рабочее время
+
+        if start_work_day_msk <= order_created_at_dt <= end_work_day_msk:
+            # Заказ создан в рабочее время (9:00 - 20:59:59) -> дедлайн +10 минут
             contact_deadline_dt = order_created_at_dt + timedelta(minutes=10)
             orders_in_work_time_count += 1
-        elif order_created_at_dt.date() == report_date_msk_date and order_created_at_dt >= end_work_day_msk:
-            # Заказ создан после 20:00 отчетного дня
+        elif order_created_at_dt >= non_work_time_start:  # Создан после 21:00 в день отчета
+            # Заказ создан после 21:00 (т.е. после non_work_time_start в день report_date_msk_date)
             contact_deadline_dt = get_next_working_day_start_msk(order_created_at_dt.date()) + timedelta(hours=2)
             orders_outside_work_time_count += 1
-        elif order_created_at_dt.date() < report_date_msk_date and order_created_at_dt.date() == (
-                report_date_msk_date - timedelta(days=1)):
-            # Заказ создан до 09:00 отчетного дня, но после 20:00 предыдущего дня.
-            # Проверяем, что дата создания - это предыдущий день.
-
-            # ИСПРАВЛЕНИЕ ОШИБКИ: ИСПОЛЬЗУЕМ datetime.combine ВМЕСТО .replace()
-            previous_day_end_work_time = datetime.combine(report_date_msk_date - timedelta(days=1),
-                                                          datetime.min.time().replace(hour=20), tzinfo=MSK_TZ)
-            if order_created_at_dt >= previous_day_end_work_time:
-                contact_deadline_dt = start_work_day_msk + timedelta(hours=2)
-                orders_outside_work_time_count += 1
+        elif order_created_at_dt >= previous_day_non_work_time and order_created_at_dt < start_work_day_msk:
+            # Заказ создан после 21:00 предыдущего дня, но до 09:00 текущего дня
+            contact_deadline_dt = start_work_day_msk + timedelta(hours=2)
+            orders_outside_work_time_count += 1
         else:
-            # Заказ не относится к анализируемому периоду (создан слишком давно)
+            # Не должен срабатывать, если is_relevant_order верен
             continue
 
         if not contact_deadline_dt:
@@ -344,38 +354,41 @@ def get_section_3_report_data(report_date_msk_date):
 
         first_contact_time = None
         for call in outgoing_calls_details:
+            # Ищем первый звонок после создания заказа
             if call['phone_number'] == normalized_customer_phone and call['datetime_msk'] >= order_created_at_dt:
                 if first_contact_time is None or call['datetime_msk'] < first_contact_time:
                     first_contact_time = call['datetime_msk']
 
         is_overdue = first_contact_time is None or first_contact_time > contact_deadline_dt
 
-        if (start_report_msk <= order_created_at_dt <= end_report_msk) or \
-                (order_created_at_dt.date() == (
-                        report_date_msk_date - timedelta(days=1)) and order_created_at_dt.hour >= 20):
-            total_relevant_orders += 1
-            if is_overdue:
-                overdue_count += 1
+        # --- ИЗМЕНЕНИЕ 1 и 2: Форматирование и фильтрация ---
+        if is_overdue:
+            overdue_count += 1
 
-        if start_report_msk <= order_created_at_dt <= end_report_msk or \
-                (order_created_at_dt.date() == (
-                        report_date_msk_date - timedelta(days=1)) and order_created_at_dt.hour >= 20):
             contact_info = first_contact_time.strftime('%Y-%m-%d %H:%M:%S') if first_contact_time else 'Нет контакта'
-            status_text = "ПРОСРОЧЕН" if is_overdue else "ОБРАБОТАН ВОВРЕМЯ"
             deadline_info = contact_deadline_dt.strftime('%Y-%m-%d %H:%M:%S')
-
             order_link = f"{RETAILCRM_BASE_URL}/orders/{order_id}/edit"
 
-            report_output_lines.append(
-                f"Заказ {order_number} ({order_link}): Создан в {created_at_str}. Дедлайн: {deadline_info}. Первый контакт: {contact_info}. Статус: {status_text}."
+            # ИЗМЕНЕНИЕ: Форматируем номер заказа как HTML-ссылку
+            order_link_formatted = f'<a href="{order_link}">Заказ {order_number}</a>'
+
+            # ИЗМЕНЕНИЕ: Используем HTML-ссылку и убираем прямую ссылку в конце
+            overdue_details.append(
+                f"{order_link_formatted} (ID {order_id}): Создан в {created_at_str}. Дедлайн: {deadline_info}. Первый контакт: {contact_info}. Статус: ПРОСРОЧЕН."
             )
 
-    report_output_lines.insert(0,
-                               f"3. Количество заказов, просроченных обработку - {overdue_count} / {total_relevant_orders}")
-    report_output_lines.insert(1,
-                               f"Количество заказов, созданных в нерабочее время (до 09:00 и после 20:00) - {orders_outside_work_time_count}")
-    report_output_lines.insert(2,
-                               f"Количество заказов, созданных в рабочее время (с 09:00 до 20:00) - {orders_in_work_time_count}")
+    # --- Формирование отчета ---
+
+    # ИЗМЕНЕНИЕ 1: Суммарная строка
+    report_output_lines.append(f"3. Количество заказов, просроченных обработку - {overdue_count}")
+    # ИЗМЕНЕНИЕ 3: Обновленное описание часов
+    report_output_lines.append(
+        f"Количество заказов, созданных в нерабочее время (до 09:00 и после 21:00) - {orders_outside_work_time_count}")
+    report_output_lines.append(
+        f"Количество заказов, созданных в рабочее время (с 09:00 до 21:00) - {orders_in_work_time_count}")
+
+    # Добавление только просроченных деталей
+    report_output_lines.extend(overdue_details)
 
     return report_output_lines
 
@@ -383,7 +396,7 @@ def get_section_3_report_data(report_date_msk_date):
 # --- 7. Тестовый скрипт для вывода данных заказа ---
 
 def test_dump_order_data(report_date_msk_date, num_orders_to_dump=1):
-    print(f"\nЗапуск тестового скрипта для вывода данных заказов RetailCRM за {report_date_msk_date}...")
+    print(f"\nЗапуск тестового скрипта для вывода данных заказа RetailCRM за {report_date_msk_date}...")
 
     if not all([RETAILCRM_BASE_URL, RETAILCRM_API_TOKEN, RETAILCRM_SITE_CODE]):
         print("Ошибка: Не все необходимые переменные окружения для RetailCRM установлены.")
