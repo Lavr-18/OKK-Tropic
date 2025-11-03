@@ -379,9 +379,14 @@ def get_section_3_report_data(report_date_msk_date):
 
     # --- Формирование отчета ---
 
-    # ИЗМЕНЕНИЕ 1: Суммарная строка
-    report_output_lines.append(f"3. Количество заказов, просроченных обработку - {overdue_count}")
-    # ИЗМЕНЕНИЕ 3: Обновленное описание часов
+    # Расчет количества выполненных заказов для итоговой строки (общее - просроченные)
+    # completed_count = total_relevant_orders - overdue_count
+
+    # ИЗМЕНЕНИЕ: Суммарная строка в формате "просрочено/всего"
+    report_output_lines.append(
+        f"3. Количество заказов, просроченных обработку - {overdue_count}/{total_relevant_orders}")
+
+    # Обновленное описание часов
     report_output_lines.append(
         f"Количество заказов, созданных в нерабочее время (до 09:00 и после 21:00) - {orders_outside_work_time_count}")
     report_output_lines.append(
