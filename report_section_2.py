@@ -42,8 +42,8 @@ def get_uis_call_history(uis_base_url, uis_api_token, date_from_str, date_to_str
     }
 
     try:
-        response = requests.post(url, json=payload_base)
-        response.raise_for_status()
+        response = requests.post(url, json=payload_base,
+                                 timeout=30)  # Добавлен таймаут 30 секунд        response.raise_for_status()
         result = response.json()
 
         if "error" in result:
